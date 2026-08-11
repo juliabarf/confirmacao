@@ -229,15 +229,48 @@ async function downloadXLSX() {
 
 async function clearData() {
     if (!confirm('Apagar todos os dados?')) return;
-    const confirmations = await getConfirmations();
-    for (const conf of confirmations) {
-        await fetch(`${SUPABASE_URL}/rest/v1/confirmados?id=eq.${conf.id}`, {
-            method: 'DELETE',
-            headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
-        });
+
+    try {
+        const confirmations = await getConfirmations();
+        if (!confirmations || confirmations.length === 0) {
+            alert('Não há dados para apagar.');
+            return;
+        }
+
+        for (const conf of confirmations) {
+            const response = await fetch(`${SUPABASE_URL}/rest/v1/confirmados?id=eq.${conf.id}`, {
+                method: 'DELETE',
+                headers: {
+                    'apikey': SUPABASE_KEY,
+                    'Authorization': `Bearer ${SUPABASE_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                let message = 'Erro ao apagar todos os dados.';
+                try {
+                    const json = JSON.parse(errorText);
+                    if (json && json.message) message = json.message;
+                } catch (error) {
+                    message = errorText || message;
+                }
+
+                if (message.toLowerCase().includes('policy') || message.toLowerCase().includes('permission') || message.toLowerCase().includes('row level security')) {
+                    throw new Error('A exclusão foi bloqueada pelo Supabase. Verifique a política RLS da tabela confirmados para permitir DELETE do público.');
+                }
+
+                throw new Error(message);
+            }
+        }
+
+        alert('Dados apagados!');
+        window.location.reload();
+    } catch (error) {
+        console.error(error);
+        alert(error.message || 'Erro ao apagar todos os dados.');
     }
-    alert('Dados apagados!');
-    location.reload();
 }
 
 
