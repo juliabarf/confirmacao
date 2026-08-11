@@ -19,47 +19,87 @@ function safeJsonParse(value) {
     }
 }
 
+function normalizeConfirmacao(value) {
+    if (value === true || value === 'true' || value === 'True' || value === 'SIM' || value === 'Sim' || value === 'sim') {
+        return 'Sim';
+    }
+    return 'Não';
+}
+
+function getTotalPeople(conf) {
+    const companionsList = safeJsonParse(conf.acompanhantes);
+    const quantidade = Number(conf.quantidade) || 0;
+    return 1 + Math.max(quantidade, companionsList.length);
+}
+
 async function saveConfirmation(data) {
     const nome = String(data.mainName || '').trim();
     const quantidade = Number(data.qtyGuests) || 0;
     const acompanhantes = Array.isArray(data.guestNames) ? data.guestNames : [];
+    const confirmacao = 'Não';
 
     if (!nome) {
         throw new Error('O nome é obrigatório.');
     }
 
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/confirmados`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${SUPABASE_KEY}`,
-            'Prefer': 'return=representation'
-        },
-        body: JSON.stringify({
-            nome,
-            quantidade,
-            acompanhantes: JSON.stringify(acompanhantes),
-            created_at: new Date().toISOString()
-        })
-    });
+    const payloadBase = {
+        nome,
+        quantidade,
+        acompanhantes: JSON.stringify(acompanhantes),
+        created_at: new Date().toISOString()
+    };
 
-    const bodyText = await response.text();
-    let body = null;
+    const payloadComConfirmacao = {
+        ...payloadBase,
+        confirmacao
+    };
 
-    try {
-        body = bodyText ? JSON.parse(bodyText) : null;
-    } catch (error) {
-        body = null;
-    }
+    const tentarEnvio = async (payload) => {
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/confirmados`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'apikey': SUPABASE_KEY,
+                'Authorization': `Bearer ${SUPABASE_KEY}`,
+                'Prefer': 'return=representation'
+            },
+            body: JSON.stringify(payload)
+        });
 
-    if (!response.ok) {
-        const message = body && body.message ? body.message : `Erro do Supabase (${response.status})`;
-        const finalMessage = message.toLowerCase().includes('row level security') || message.toLowerCase().includes('policy') || message.toLowerCase().includes('permission')
-            ? 'A inserção foi bloqueada pelo Supabase. Verifique a política RLS da tabela confirmados ou crie uma política de INSERT permitida para o público.'
-            : message;
-        throw new Error(finalMessage);
-    }
+        const bodyText = await response.text();
+        let body = null;
+
+        try {
+            body = bodyText ? JSON.parse(bodyText) : null;
+        } catch (error) {
+            body = null;
+        }
+
+        if (!response.ok) {
+            const message = body && body.message ? body.message : `Erro do Supabase (${response.status})`;
+            const texto = message.toLowerCase();
+            const colunaFaltando = texto.includes('confirmacao') && (
+                texto.includes('does not exist') ||
+                texto.includes('schema cache') ||
+                texto.includes('could not find') ||
+                texto.includes('column')
+            );
+
+            if (colunaFaltando) {
+                throw new Error('A coluna confirmacao ainda não existe na tabela public.confirmados. No Supabase, execute:\n\nALTER TABLE public.confirmados ADD COLUMN IF NOT EXISTS confirmacao text;');
+            }
+
+            const finalMessage = texto.includes('row level security') || texto.includes('policy') || texto.includes('permission')
+                ? 'A inserção foi bloqueada pelo Supabase. Verifique a política RLS da tabela confirmados ou crie uma política de INSERT permitida para o público.'
+                : message;
+
+            throw new Error(finalMessage);
+        }
+
+        return { fallback: false, message: null };
+    };
+
+    await tentarEnvio(payloadComConfirmacao);
 
     return true;
 }
@@ -74,26 +114,116 @@ async function getConfirmations() {
     return await response.json();
 }
 
-async function downloadCSV() {
+async function downloadXLSX() {
+    if (typeof ExcelJS === 'undefined') {
+        alert('Biblioteca ExcelJS não carregada. Adicione o <script> do ExcelJS antes do script.js no HTML.');
+        return;
+    }
+
     const confirmations = await getConfirmations();
     if (!confirmations || confirmations.length === 0) {
         alert('Nada para baixar.');
         return;
     }
 
-    let csvContent = "data:text/csv;charset=utf-8,Data,Nome,Quantidade,Acompanhantes\n";
+    const VERDE_ESCURO = 'FF2E7D47';
+    const VERDE_MEDIO = 'FF66BB6A';
+    const VERDE_CLARO = 'FFE8F5E9';
+    const VERDE_LISTRA = 'FFF1F8F2';
+    const BRANCO = 'FFFFFFFF';
+    const VERDE_TEXTO = 'FF1B5E20';
 
-    confirmations.forEach(conf => {
-        let date = new Date(conf.created_at).toLocaleDateString('pt-BR');
-        const companionsList = safeJsonParse(conf.acompanhantes);
-        let companions = companionsList.length > 0 ? companionsList.join(' / ') : '';
-        let row = `${date},"${conf.nome}",${conf.quantidade},"${companions}"`;
-        csvContent += row + "\n";
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Confirmados');
+
+    sheet.columns = [
+        { width: 4 },
+        { width: 28 },
+        { width: 18 },
+        { width: 32 },
+        { width: 10 },
+        { width: 14 }
+    ];
+
+    let totalPessoas = 0;
+
+    confirmations.forEach(c => {
+        totalPessoas += getTotalPeople(c);
     });
 
-    const link = document.createElement("a");
-    link.href = encodeURI(csvContent);
-    link.download = "confirmacoes.csv";
+    sheet.mergeCells('A1:B1');
+    sheet.getCell('A1').value = 'Confirmação de Presença';
+    sheet.getCell('A1').font = { bold: true, size: 12, color: { argb: VERDE_TEXTO } };
+
+    sheet.mergeCells('A2:D2');
+    sheet.getCell('A2').value = 'Respostas da confirmação de presença';
+    sheet.getCell('A2').font = { bold: true, size: 16, color: { argb: VERDE_TEXTO } };
+
+    sheet.mergeCells('E1:F1');
+    const totalCell = sheet.getCell('E1');
+    totalCell.value = `Total de pessoas: ${totalPessoas}`;
+    totalCell.font = { bold: true, color: { argb: BRANCO } };
+    totalCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: VERDE_ESCURO } };
+    totalCell.alignment = { horizontal: 'center' };
+
+    sheet.getCell('E2').value = `Total: ${totalPessoas}`;
+    sheet.getCell('F2').value = `Pessoas: ${totalPessoas}`;
+    ['E2', 'F2'].forEach(ref => {
+        const cell = sheet.getCell(ref);
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: VERDE_CLARO } };
+        cell.font = { color: { argb: VERDE_TEXTO }, bold: true, size: 10 };
+        cell.alignment = { horizontal: 'center' };
+    });
+
+    sheet.addRow([]);
+
+    sheet.mergeCells('A4:F4');
+    const labelCell = sheet.getCell('A4');
+    labelCell.value = 'CONVIDADOS CONFIRMADOS';
+    labelCell.font = { bold: true, color: { argb: BRANCO } };
+    labelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: VERDE_ESCURO } };
+    labelCell.alignment = { horizontal: 'center' };
+
+    const headerRow = sheet.getRow(5);
+    headerRow.values = ['#', 'Nome', 'Qtd. acompanhantes', 'Acompanhantes', 'Pessoas', 'Data'];
+    headerRow.eachCell(cell => {
+        cell.font = { bold: true, color: { argb: BRANCO } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: VERDE_MEDIO } };
+        cell.alignment = { horizontal: 'center' };
+        cell.border = { bottom: { style: 'thin', color: { argb: VERDE_ESCURO } } };
+    });
+
+    confirmations.forEach((conf, index) => {
+        const date = new Date(conf.created_at).toLocaleDateString('pt-BR');
+        const companionsList = safeJsonParse(conf.acompanhantes);
+        const companions = companionsList.length > 0 ? companionsList.join(', ') : '-';
+        const totalPessoasLinha = getTotalPeople(conf);
+
+        const row = sheet.addRow([
+            index + 1,
+            conf.nome,
+            conf.quantidade,
+            companions,
+            totalPessoasLinha,
+            date
+        ]);
+
+        row.eachCell(cell => {
+            cell.alignment = { horizontal: 'center' };
+        });
+
+        if (index % 2 === 1) {
+            row.eachCell(cell => {
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: VERDE_LISTRA } };
+            });
+        }
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/octet-stream' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'confirmacoes.xlsx';
     link.click();
 }
 
@@ -149,20 +279,27 @@ async function carregarLista() {
     const confirmations = await getConfirmations();
 
     if (!confirmations || confirmations.length === 0) {
-        listContainer.innerHTML = '<p>Nenhuma confirmação ainda.</p>';
+        listContainer.innerHTML = '<div class="empty-state">Nenhuma confirmação ainda.</div>';
         return;
     }
 
-    let totalGente = 0;
-    confirmations.forEach(c => totalGente += (1 + (c.quantidade || 0)));
+    let totalPessoas = 0;
+    confirmations.forEach(c => {
+        totalPessoas += getTotalPeople(c);
+    });
 
     let html = `
-        <div style="background:#f0f0f0; padding:15px; border-radius:5px; margin-bottom:20px;">
-            <strong>Total:</strong> ${confirmations.length} | <strong>Pessoas:</strong> ${totalGente}
+        <div style="background:#f0f0f0; padding:15px; border-radius:5px; margin-bottom:20px; line-height:1.8;">
+            <div><strong>Total de pessoas:</strong> ${totalPessoas}</div>
         </div>
         <table style="width:100%; border-collapse:collapse;">
             <tr style="background:#4CAF50; color:white;">
-                <th>#</th><th>Data</th><th>Nome</th><th>+Qtd</th><th>Acompanhantes</th>
+                <th>#</th>
+                <th>Data</th>
+                <th>Nome</th>
+                <th>+Qtd</th>
+                <th>Acompanhantes</th>
+                <th>Pessoas</th>
             </tr>
     `;
 
@@ -170,6 +307,7 @@ async function carregarLista() {
         let date = new Date(conf.created_at).toLocaleDateString('pt-BR');
         let companionsList = safeJsonParse(conf.acompanhantes);
         let companions = companionsList.length > 0 ? companionsList.join(', ') : '-';
+        const totalPessoasLinha = getTotalPeople(conf);
 
         html += `<tr style="border-bottom:1px solid #ddd;">
             <td>${index + 1}</td>
@@ -177,10 +315,12 @@ async function carregarLista() {
             <td><strong>${conf.nome}</strong></td>
             <td>${conf.quantidade}</td>
             <td>${companions}</td>
+            <td>${totalPessoasLinha}</td>
         </tr>`;
     });
 
     html += '</table>';
+
     listContainer.innerHTML = html;
 }
 
